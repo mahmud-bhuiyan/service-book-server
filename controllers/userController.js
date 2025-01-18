@@ -1,132 +1,214 @@
-import User from '../models/User.js';
+import User from "../models/User.js";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import asyncWrapper from "../middlewares/asyncWrapper.js";
+import { createCustomError } from "../errors/customError.js";
 
-// @desc    Get all users
-// @route   GET /api/users
-// @access  Public (Change to Private if authentication is required)
-export const getUsers = async (req, res, next) => {
-  try {
-    const users = await User.find().select("-password");
-    res.status(200).json({
-      success: true,
-      count: users.length,
-      data: users,
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ success: false, error: "Server Error" });
-  }
+// custom user details
+const customUserDetails = (user) => {
+  const { _id, name, userName, email, photoURL, phone, role, isDeleted } = user;
+  return { _id, name, userName, email, photoURL, phone, role, isDeleted };
 };
 
-// @desc    Get single user by ID
-// @route   GET /api/users/:id
-// @access  Public
-export const getUserById = async (req, res, next) => {
-  try {
-    const user = await User.findById(req.params.id).select("-password");
-
-    if (!user) {
-      return res.status(404).json({ success: false, error: "User not found" });
-    }
-
-    res.status(200).json({ success: true, data: user });
-  } catch (error) {
-    console.error(error);
-    // Check for invalid ObjectId
-    if (error.kind === "ObjectId") {
-      return res.status(400).json({ success: false, error: "Invalid User ID" });
-    }
-    res.status(500).json({ success: false, error: "Server Error" });
-  }
+// JWT token
+const generateAuthToken = (userId) => {
+  return jwt.sign({ _id: userId.toString() }, process.env.JWT_SECRET_KEY, {
+    expiresIn: "1d",
+  });
 };
 
-// @desc    Create a new user
-// @route   POST /api/users
-// @access  Public
-export const createUser = async (req, res, next) => {
-  try {
-    const { name, email, password } = req.body;
+/**
+ * @desc    Register a new user
+ * @route   POST /api/users/register
+ * @access  Public
+ * @param   {string} name - User's full name
+ * @param   {string} userName - Unique username
+ * @param   {string} email - User's email address
+ * @param   {string} password - User's password (min 6 characters)
+ * @param   {string} [phone] - User's phone number (optional)
+ * @returns {object} User details and JWT token
+ */
+export const registerUser = asyncWrapper(async (req, res) => {
+  const { name, userName, email, password, phone } = req.body;
 
-    // Basic validation
-    if (!name || !email || !password) {
-      return res
-        .status(400)
-        .json({ success: false, error: "Please provide all required fields" });
+  const existingUser = await User.findOne({ $or: [{ email }, { userName }] });
+  if (existingUser) {
+    if (existingUser.email === email) {
+      throw createCustomError("User already exists with this email", 400);
+    } else {
+      throw createCustomError("Username is already taken", 400);
     }
-
-    // Check if user already exists
-    let user = await User.findOne({ email });
-    if (user) {
-      return res
-        .status(400)
-        .json({ success: false, error: "User already exists with this email" });
-    }
-
-    // Create new user
-    user = await User.create({
-      name,
-      email,
-      password, // Note: In a real application, make sure to hash passwords before saving
-    });
-
-    res.status(201).json({ success: true, data: user });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ success: false, error: "Server Error" });
   }
-};
 
-// @desc    Update an existing user
-// @route   PUT /api/users/:id
-// @access  Public
-export const updateUser = async (req, res, next) => {
-  try {
-    const { name, email } = req.body;
+  const user = await User.create({
+    name,
+    userName,
+    email,
+    password,
+    phone,
+  });
 
-    // Find user by ID
-    let user = await User.findById(req.params.id);
+  const token = generateAuthToken(user._id);
+  const userDetails = customUserDetails(user);
 
-    if (!user) {
-      return res.status(404).json({ success: false, error: "User not found" });
-    }
+  res.status(201).json({
+    success: true,
+    message: "User registered successfully",
+    user: userDetails,
+    token,
+  });
+});
 
-    // Update fields
-    user.name = name || user.name;
-    user.email = email || user.email;
+/**
+ * @desc    Login user
+ * @route   POST /api/users/login
+ * @access  Public
+ * @param   {string} loginCred - Email, username, or phone number
+ * @param   {string} password - User's password
+ * @returns {object} User details and JWT token
+ */
+export const loginUser = asyncWrapper(async (req, res) => {
+  const { loginCred, password } = req.body;
 
-    // Save updates
-    await user.save();
+  const user = await User.findOne({
+    $or: [{ email: loginCred }, { userName: loginCred }, { phone: loginCred }],
+  }).select("+password");
 
-    res.status(200).json({ success: true, data: user });
-  } catch (error) {
-    console.error(error);
-    // Check for invalid ObjectId
-    if (error.kind === "ObjectId") {
-      return res.status(400).json({ success: false, error: "Invalid User ID" });
-    }
-    res.status(500).json({ success: false, error: "Server Error" });
+  if (!user) {
+    throw createCustomError("User not found", 404);
   }
-};
 
-// @desc    Delete a user
-// @route   DELETE /api/users/:id
-// @access  Public
-export const deleteUser = async (req, res, next) => {
-  try {
-    const user = await User.findById(req.params.id);
-
-    if (!user) {
-      return res.status(404).json({ success: false, error: "User not found" });
-    }
-
-    await user.remove();
-
-    res.status(200).json({ success: true, data: {} });
-  } catch (error) {
-    console.error(error);
-    // Check for invalid ObjectId
-    if (error.kind === "ObjectId") {
-      return res.status(400).json({ success: false, error: "Invalid User ID" });
-    }
-    res.status(500).json({ success: false, error: "Server Error" });
+  if (!user.password) {
+    throw createCustomError("Please login with Google", 401);
   }
-};
+
+  const isMatch = await bcrypt.compare(password, user.password);
+  if (!isMatch) {
+    throw createCustomError("Invalid credentials", 401);
+  }
+
+  const token = generateAuthToken(user._id);
+  const userDetails = customUserDetails(user);
+  res.status(200).json({
+    success: true,
+    message: "Logged in successfully",
+    user: userDetails,
+    token,
+  });
+});
+
+/**
+ * @desc    Get all users
+ * @route   GET /api/users
+ * @access  Private/Admin
+ * @returns {object} Array of user objects
+ */
+export const getUsers = asyncWrapper(async (req, res) => {
+  const users = await User.find({ isDeleted: false }).select("-password");
+  res.status(200).json({
+    success: true,
+    count: users.length,
+    data: users,
+  });
+});
+
+/**
+ * @desc    Get user by ID
+ * @route   GET /api/users/:id
+ * @access  Private
+ * @param   {string} id - User ID
+ * @returns {object} User details
+ */
+export const getUserById = asyncWrapper(async (req, res) => {
+  const user = await User.findOne({
+    _id: req.params.id,
+    isDeleted: false,
+  }).select("-password");
+
+  if (!user) {
+    throw createCustomError("User not found", 404);
+  }
+
+  res.status(200).json({ success: true, data: user });
+});
+
+/**
+ * @desc    Update user
+ * @route   PUT /api/users/:id
+ * @access  Private
+ * @param   {string} id - User ID
+ * @param   {object} updateData - Data to update (name, email, phone, photoURL)
+ * @returns {object} Updated user details
+ */
+export const updateUser = asyncWrapper(async (req, res) => {
+  const { name, email, phone, photoURL } = req.body;
+
+  const user = await User.findOne({ _id: req.params.id, isDeleted: false });
+
+  if (!user) {
+    throw createCustomError("User not found", 404);
+  }
+
+  user.name = name || user.name;
+  user.email = email || user.email;
+  user.phone = phone || user.phone;
+  user.photoURL = photoURL || user.photoURL;
+
+  await user.save();
+
+  res.status(200).json({ success: true, data: customUserDetails(user) });
+});
+
+/**
+ * @desc    Soft delete user
+ * @route   DELETE /api/users/:id
+ * @access  Private/Admin
+ * @param   {string} id - User ID
+ * @returns {object} Success message
+ */
+export const deleteUser = asyncWrapper(async (req, res) => {
+  const user = await User.findOne({ _id: req.params.id, isDeleted: false });
+
+  if (!user) {
+    throw createCustomError("User not found", 404);
+  }
+
+  user.isDeleted = true;
+  await user.save();
+
+  res.status(200).json({ success: true, message: "User deleted successfully" });
+});
+
+/**
+ * @desc    Change user password
+ * @route   PUT /api/users/:id/change-password
+ * @access  Private
+ * @param   {string} id - User ID
+ * @param   {string} currentPassword - Current password
+ * @param   {string} newPassword - New password
+ * @returns {object} Success message
+ */
+export const changePassword = asyncWrapper(async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+
+  const user = await User.findOne({
+    _id: req.params.id,
+    isDeleted: false,
+  }).select("+password");
+
+  if (!user) {
+    throw createCustomError("User not found", 404);
+  }
+
+  const isMatch = await bcrypt.compare(currentPassword, user.password);
+  if (!isMatch) {
+    throw createCustomError("Current password is incorrect", 401);
+  }
+
+  user.password = newPassword;
+  await user.save();
+
+  res
+    .status(200)
+    .json({ success: true, message: "Password changed successfully" });
+});

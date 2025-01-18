@@ -1,8 +1,10 @@
-require("dotenv").config();
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const config = {
   MONGO_URI: process.env.MONGO_URI,
   MONGODB_NAME: process.env.MONGODB_NAME,
 };
 
-module.exports = config;
+export default config;
